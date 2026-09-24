@@ -15,6 +15,7 @@ from claude_code_api.core.claude_manager import (
     ClaudeSessionConflictError,
     ClaudeUsageLimitError,
     create_project_directory,
+    raise_for_usage_limit,
 )
 from claude_code_api.core.session_manager import SessionManager
 from claude_code_api.models.claude import get_default_model, validate_claude_model
@@ -187,6 +188,7 @@ async def _collect_non_streaming_response(
     project_id: str,
 ) -> Dict[str, Any]:
     messages, parser = await _gather_claude_messages(claude_process)
+    raise_for_usage_limit(getattr(claude_process, "terminal_error", None))
     _log_message_summary(messages)
 
     usage_summary = OpenAIConverter.calculate_usage(parser)
