@@ -102,6 +102,34 @@ async def _log_raw_request(req: Request) -> None:
     )
 
 
+SPEAKER_LABELS = {"user": "Human", "assistant": "Assistant"}
+
+
+def _build_conversation_prompt(messages) -> str:
+    """Fold prior turns into the prompt, since each run starts a new CLI session."""
+    last_user_index = max(
+        index for index, msg in enumerate(messages) if msg.role == "user"
+    )
+    latest = messages[last_user_index].get_text_content()
+
+    history = []
+    for msg in messages[:last_user_index]:
+        label = SPEAKER_LABELS.get(msg.role)
+        text = msg.get_text_content() if label else ""
+        if text:
+            history.append(f"{label}: {text}")
+
+    if not history:
+        return latest
+
+    return (
+        "Conversation so far:\n\n"
+        + "\n\n".join(history)
+        + "\n\nReply to this latest message only:\n\n"
+        + latest
+    )
+
+
 def _extract_prompts(request: ChatCompletionRequest) -> Tuple[str, str]:
     if not request.messages:
         raise _http_error(
@@ -118,7 +146,7 @@ def _extract_prompts(request: ChatCompletionRequest) -> Tuple[str, str]:
             "invalid_request_error",
             "missing_user_message",
         )
-    user_prompt = user_messages[-1].get_text_content()
+    user_prompt = _build_conversation_prompt(request.messages)
     system_messages = [msg for msg in request.messages if msg.role == "system"]
     system_prompt = (
         system_messages[0].get_text_content()
