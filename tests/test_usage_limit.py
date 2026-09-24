@@ -167,3 +167,23 @@ async def test_startup_drains_pending_output_before_composing_error(tmp_path):
 
     assert await process._verify_startup() is False
     assert "Usage limit reached" in process.last_error
+
+
+@pytest.mark.asyncio
+async def test_late_usage_limit_is_raised_not_returned_as_content(monkeypatch):
+    """A limit reported after startup must not surface as a successful reply."""
+    from claude_code_api.api import chat as chat_api
+    from claude_code_api.utils.parser import ClaudeOutputParser
+
+    class _Process:
+        terminal_error = "Usage limit reached resets_at=1774000000"
+
+    async def fake_gather(_process):
+        return [], ClaudeOutputParser()
+
+    monkeypatch.setattr(chat_api, "_gather_claude_messages", fake_gather)
+
+    with pytest.raises(cm.ClaudeUsageLimitError):
+        await chat_api._collect_non_streaming_response(
+            _Process(), None, "sess", "claude-haiku-4-5-20251001", "proj"
+        )

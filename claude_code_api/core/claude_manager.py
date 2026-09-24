@@ -210,6 +210,11 @@ class ClaudeProcess:
         except Exception as e:
             logger.error("Error reading stderr", error=str(e))
 
+    @property
+    def terminal_error(self) -> Optional[str]:
+        """Error Claude reported on stdout, if the run ended in one."""
+        return self._result_error
+
     async def _drain_readers(self) -> None:
         """Let buffered stdout and stderr be consumed before reporting an error."""
         for task in (self._output_task, self._error_task):
@@ -365,6 +370,14 @@ class ClaudeUsageLimitError(ClaudeManagerError):
     def __init__(self, message: str, reset_at: Optional[datetime] = None):
         super().__init__(message)
         self.reset_at = reset_at
+
+
+def raise_for_usage_limit(error_message: Optional[str]) -> None:
+    """Raise when Claude reported an exhausted subscription."""
+    if error_message and _is_usage_limit_error(error_message):
+        raise ClaudeUsageLimitError(
+            error_message, reset_at=_extract_usage_limit_reset(error_message)
+        )
 
 
 def _is_model_rejection_error(error_message: str) -> bool:
@@ -549,10 +562,7 @@ class ClaudeManager:
                 return process
 
             last_error = process.last_error or last_error
-            if _is_usage_limit_error(last_error):
-                raise ClaudeUsageLimitError(
-                    last_error, reset_at=_extract_usage_limit_reset(last_error)
-                )
+            raise_for_usage_limit(last_error)
             if not _is_model_rejection_error(last_error):
                 raise ClaudeProcessStartError(last_error)
 
