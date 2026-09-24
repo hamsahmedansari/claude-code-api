@@ -3,8 +3,10 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional
 
 import structlog
@@ -39,6 +41,7 @@ class ClaudeProcess:
         self._on_cli_session_id = on_cli_session_id
         self._on_end = on_end
         self.last_error: Optional[str] = None
+        self._result_error: Optional[str] = None
         self._stderr_tail: deque[str] = deque(maxlen=20)
 
     async def start(
@@ -49,6 +52,7 @@ class ClaudeProcess:
     ) -> bool:
         """Start Claude Code process and wait for completion."""
         self.last_error = None
+        self._result_error = None
         try:
             # Prepare real command - using exact format from working Claudia example
             cmd = [settings.claude_binary_path]
@@ -153,6 +157,8 @@ class ClaudeProcess:
                 if not data:
                     continue
 
+                self._record_output_error(data)
+
                 # Extract Claude's session ID from the first message
                 if not claude_session_id and data.get("session_id"):
                     claude_session_id = data["session_id"]
@@ -175,6 +181,15 @@ class ClaudeProcess:
             )
             if self._on_end:
                 self._on_end(self)
+
+    def _record_output_error(self, data: Dict[str, Any]) -> None:
+        """Capture errors Claude reports on stdout instead of stderr."""
+        if data.get("type") != "result" or not data.get("is_error"):
+            return
+
+        result_text = data.get("result")
+        if isinstance(result_text, str) and result_text.strip():
+            self._result_error = result_text.strip()
 
     async def _read_error(self):
         """Read stderr from process."""
@@ -222,8 +237,12 @@ class ClaudeProcess:
         return True
 
     def _compose_process_error(self, return_code: int) -> str:
-        if self._stderr_tail:
-            return f"Claude exited with code {return_code}: {' | '.join(self._stderr_tail)}"
+        details: List[str] = []
+        if self._result_error:
+            details.append(self._result_error)
+        details.extend(self._stderr_tail)
+        if details:
+            return f"Claude exited with code {return_code}: {' | '.join(details)}"
         return f"Claude exited with code {return_code}"
 
     async def get_output(self) -> AsyncGenerator[Dict[str, Any], None]:
@@ -315,6 +334,14 @@ class ClaudeModelNotSupportedError(ClaudeManagerError):
     """Raised when Claude rejects a requested model."""
 
 
+class ClaudeUsageLimitError(ClaudeManagerError):
+    """Raised when the Claude subscription usage limit is reached."""
+
+    def __init__(self, message: str, reset_at: Optional[datetime] = None):
+        super().__init__(message)
+        self.reset_at = reset_at
+
+
 def _is_model_rejection_error(error_message: str) -> bool:
     lowered = (error_message or "").lower()
     patterns = (
@@ -326,6 +353,30 @@ def _is_model_rejection_error(error_message: str) -> bool:
         "not a valid model",
     )
     return any(pattern in lowered for pattern in patterns)
+
+
+def _is_usage_limit_error(error_message: str) -> bool:
+    return "usage limit reached" in (error_message or "").lower()
+
+
+def _epoch_to_datetime(value: str) -> Optional[datetime]:
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _extract_usage_limit_reset(error_message: str) -> Optional[datetime]:
+    message = error_message or ""
+    marker = message.lower().find("usage limit reached")
+    if marker >= 0:
+        message = message[marker:]
+
+    for match in re.finditer(r"(?:resets?_at[=:]\s*|\|)(\d{10})(?!\d)", message):
+        reset = _epoch_to_datetime(match.group(1))
+        if reset:
+            return reset
+    return None
 
 
 def _resolve_opus_45_fallback(model_id: Optional[str]) -> Optional[str]:
@@ -473,6 +524,10 @@ class ClaudeManager:
                 return process
 
             last_error = process.last_error or last_error
+            if _is_usage_limit_error(last_error):
+                raise ClaudeUsageLimitError(
+                    last_error, reset_at=_extract_usage_limit_reset(last_error)
+                )
             if not _is_model_rejection_error(last_error):
                 raise ClaudeProcessStartError(last_error)
 

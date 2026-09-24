@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 import structlog
@@ -12,6 +13,7 @@ from pydantic import ValidationError
 from claude_code_api.core.claude_manager import (
     ClaudeModelNotSupportedError,
     ClaudeSessionConflictError,
+    ClaudeUsageLimitError,
     create_project_directory,
 )
 from claude_code_api.core.session_manager import SessionManager
@@ -33,6 +35,8 @@ from claude_code_api.utils.streaming import (
 )
 
 logger = structlog.get_logger()
+
+MAX_RETRY_AFTER_SECONDS = 86400
 router = APIRouter()
 
 CHAT_COMPLETION_RESPONSES = {
@@ -49,17 +53,25 @@ CHAT_COMPLETION_RESPONSES = {
     },
     400: {"model": ErrorResponse},
     422: {"model": ErrorResponse},
+    429: {"model": ErrorResponse},
     503: {"model": ErrorResponse},
     500: {"model": ErrorResponse},
 }
 
 
 def _http_error(
-    status_code: int, message: str, error_type: str, code: str
+    status_code: int,
+    message: str,
+    error_type: str,
+    code: str,
+    extra: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
 ) -> HTTPException:
+    error: Dict[str, Any] = {"message": message, "type": error_type, "code": code}
+    if extra:
+        error.update(extra)
     return HTTPException(
-        status_code=status_code,
-        detail={"error": {"message": message, "type": error_type, "code": code}},
+        status_code=status_code, detail={"error": error}, headers=headers
     )
 
 
@@ -355,6 +367,29 @@ async def create_chat_completion(request: ChatCompletionRequest, req: Request) -
                 "The requested model is not supported.",
                 "invalid_request_error",
                 "model_not_supported",
+            ) from e
+        except ClaudeUsageLimitError as e:
+            logger.warning(
+                "Claude usage limit reached",
+                session_id=session_id,
+                reset_at=e.reset_at.isoformat() if e.reset_at else None,
+            )
+            extra: Dict[str, Any] = {}
+            headers: Dict[str, str] = {}
+            if e.reset_at:
+                extra["reset_at"] = e.reset_at.isoformat()
+                retry_after = (e.reset_at - datetime.now(timezone.utc)).total_seconds()
+                if retry_after > 0:
+                    headers["Retry-After"] = str(
+                        min(int(retry_after) + 1, MAX_RETRY_AFTER_SECONDS)
+                    )
+            raise _http_error(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Claude subscription usage limit reached.",
+                "rate_limit_error",
+                "usage_limit_reached",
+                extra=extra or None,
+                headers=headers or None,
             ) from e
         except Exception as e:
             logger.error(

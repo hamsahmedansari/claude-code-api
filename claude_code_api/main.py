@@ -125,8 +125,14 @@ app.middleware("http")(auth_middleware)
 async def http_exception_handler(request, exc):
     """Custom handler for HTTP exceptions to support OpenAI error format."""
     if isinstance(exc.detail, dict) and "error" in exc.detail:
-        return JSONResponse(status_code=exc.status_code, content=exc.detail)
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return JSONResponse(
+            status_code=exc.status_code, content=exc.detail, headers=exc.headers
+        )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=exc.headers,
+    )
 
 
 @app.exception_handler(RequestValidationError)

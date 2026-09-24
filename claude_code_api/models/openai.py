@@ -277,6 +277,9 @@ class ErrorDetail(BaseModel):
     message: str = Field(..., description="Human-readable error message")
     type: str = Field(..., description="Error type")
     code: Optional[str] = Field(None, description="Error code")
+    reset_at: Optional[str] = Field(
+        None, description="ISO timestamp when the usage limit resets"
+    )
 
 
 class ErrorResponse(BaseModel):

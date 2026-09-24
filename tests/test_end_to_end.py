@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -23,6 +24,7 @@ from httpx import AsyncClient
 from claude_code_api.core.claude_manager import (
     ClaudeModelNotSupportedError,
     ClaudeSessionConflictError,
+    ClaudeUsageLimitError,
 )
 from claude_code_api.core.config import settings
 from claude_code_api.core.session_manager import SessionManager
@@ -432,6 +434,94 @@ class TestChatCompletions:
         assert response.status_code == 400
         data = response.json()
         assert data["error"]["code"] == "model_not_supported"
+
+    def test_chat_completion_returns_usage_limit_reached(self, client, monkeypatch):
+        """Return HTTP 429 when the Claude subscription usage limit is reached."""
+        claude_manager = client.app.state.claude_manager
+        reset_at = datetime.now(timezone.utc) + timedelta(hours=2)
+
+        async def fake_create_session(*args, **kwargs):
+            raise ClaudeUsageLimitError("Usage limit reached", reset_at=reset_at)
+
+        monkeypatch.setattr(claude_manager, "create_session", fake_create_session)
+
+        request_data = {
+            "model": DEFAULT_MODEL,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": False,
+        }
+
+        response = client.post("/v1/chat/completions", json=request_data)
+        assert response.status_code == 429
+        data = response.json()
+        assert data["error"]["code"] == "usage_limit_reached"
+        assert data["error"]["type"] == "rate_limit_error"
+        assert data["error"]["reset_at"] == reset_at.isoformat()
+        assert 0 < int(response.headers["retry-after"]) <= 7200
+
+    def test_streaming_usage_limit_returns_error_before_stream(
+        self, client, monkeypatch
+    ):
+        """Return HTTP 429 for streaming requests instead of opening a broken stream."""
+        claude_manager = client.app.state.claude_manager
+
+        async def fake_create_session(*args, **kwargs):
+            raise ClaudeUsageLimitError("Usage limit reached")
+
+        monkeypatch.setattr(claude_manager, "create_session", fake_create_session)
+
+        request_data = {
+            "model": DEFAULT_MODEL,
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": True,
+        }
+
+        response = client.post("/v1/chat/completions", json=request_data)
+        assert response.status_code == 429
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json()["error"]["code"] == "usage_limit_reached"
+
+    def test_usage_limit_omits_retry_after_for_stale_reset(self, client, monkeypatch):
+        """Do not advertise Retry-After when the reported reset already passed."""
+        claude_manager = client.app.state.claude_manager
+        reset_at = datetime.now(timezone.utc) - timedelta(hours=1)
+
+        async def fake_create_session(*args, **kwargs):
+            raise ClaudeUsageLimitError("Usage limit reached", reset_at=reset_at)
+
+        monkeypatch.setattr(claude_manager, "create_session", fake_create_session)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": DEFAULT_MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": False,
+            },
+        )
+        assert response.status_code == 429
+        assert "retry-after" not in response.headers
+
+    def test_usage_limit_clamps_far_future_retry_after(self, client, monkeypatch):
+        """Clamp Retry-After so a bad reset time cannot disable retries."""
+        claude_manager = client.app.state.claude_manager
+        reset_at = datetime.now(timezone.utc) + timedelta(days=400)
+
+        async def fake_create_session(*args, **kwargs):
+            raise ClaudeUsageLimitError("Usage limit reached", reset_at=reset_at)
+
+        monkeypatch.setattr(claude_manager, "create_session", fake_create_session)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": DEFAULT_MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": False,
+            },
+        )
+        assert response.status_code == 429
+        assert int(response.headers["retry-after"]) == 86400
 
 
 class TestConversationFlow:

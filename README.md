@@ -85,6 +85,33 @@ curl -X POST http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+## Error Responses
+
+Errors use the OpenAI error shape: `{"error": {"message", "type", "code"}}`.
+
+| Status | `error.code` | Meaning |
+| --- | --- | --- |
+| 400 | `model_not_supported` | Claude rejected every attempted model. |
+| 409 | `session_busy` | The session already has an active Claude process. |
+| 429 | `usage_limit_reached` | The Claude subscription usage limit is reached. |
+| 429 | `rate_limit_exceeded` | This gateway's own per-client rate limit was hit. |
+| 503 | `claude_unavailable` | Claude Code failed to start for another reason. |
+
+`usage_limit_reached` is reported separately from `claude_unavailable` so callers can
+fall back to another provider instead of retrying. When the CLI reports a reset time,
+the response adds a `Retry-After` header and a `reset_at` field:
+
+```json
+{
+  "error": {
+    "message": "Claude subscription usage limit reached.",
+    "type": "rate_limit_error",
+    "code": "usage_limit_reached",
+    "reset_at": "2027-03-20T09:46:40+00:00"
+  }
+}
+```
+
 ## Configuration
 
 Common settings are in `claude_code_api/core/config.py`:
