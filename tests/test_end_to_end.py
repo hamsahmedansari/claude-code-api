@@ -523,6 +523,26 @@ class TestChatCompletions:
         assert response.status_code == 429
         assert int(response.headers["retry-after"]) == 86400
 
+    def test_usage_limit_after_startup_maps_to_429(self, client, monkeypatch):
+        """A limit raised while collecting output must not become a 500."""
+        from claude_code_api.api import chat as chat_api
+
+        async def fake_collect(*args, **kwargs):
+            raise ClaudeUsageLimitError("Usage limit reached")
+
+        monkeypatch.setattr(chat_api, "_collect_non_streaming_response", fake_collect)
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": DEFAULT_MODEL,
+                "messages": [{"role": "user", "content": "Hi"}],
+                "stream": False,
+            },
+        )
+        assert response.status_code == 429
+        assert response.json()["error"]["code"] == "usage_limit_reached"
+
 
 class TestConversationFlow:
     """Test conversation flow and session management."""

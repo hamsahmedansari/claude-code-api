@@ -129,6 +129,33 @@ def _extract_prompts(request: ChatCompletionRequest) -> Tuple[str, str]:
     return user_prompt, system_prompt
 
 
+def _usage_limit_error(
+    error: ClaudeUsageLimitError, session_id: Optional[str] = None
+) -> HTTPException:
+    logger.warning(
+        "Claude usage limit reached",
+        session_id=session_id,
+        reset_at=error.reset_at.isoformat() if error.reset_at else None,
+    )
+    extra: Dict[str, Any] = {}
+    headers: Dict[str, str] = {}
+    if error.reset_at:
+        extra["reset_at"] = error.reset_at.isoformat()
+        retry_after = (error.reset_at - datetime.now(timezone.utc)).total_seconds()
+        if retry_after > 0:
+            headers["Retry-After"] = str(
+                min(int(retry_after) + 1, MAX_RETRY_AFTER_SECONDS)
+            )
+    return _http_error(
+        status.HTTP_429_TOO_MANY_REQUESTS,
+        "Claude subscription usage limit reached.",
+        "rate_limit_error",
+        "usage_limit_reached",
+        extra=extra or None,
+        headers=headers or None,
+    )
+
+
 async def _resolve_session(
     session_manager: SessionManager,
     request: ChatCompletionRequest,
@@ -371,28 +398,7 @@ async def create_chat_completion(request: ChatCompletionRequest, req: Request) -
                 "model_not_supported",
             ) from e
         except ClaudeUsageLimitError as e:
-            logger.warning(
-                "Claude usage limit reached",
-                session_id=session_id,
-                reset_at=e.reset_at.isoformat() if e.reset_at else None,
-            )
-            extra: Dict[str, Any] = {}
-            headers: Dict[str, str] = {}
-            if e.reset_at:
-                extra["reset_at"] = e.reset_at.isoformat()
-                retry_after = (e.reset_at - datetime.now(timezone.utc)).total_seconds()
-                if retry_after > 0:
-                    headers["Retry-After"] = str(
-                        min(int(retry_after) + 1, MAX_RETRY_AFTER_SECONDS)
-                    )
-            raise _http_error(
-                status.HTTP_429_TOO_MANY_REQUESTS,
-                "Claude subscription usage limit reached.",
-                "rate_limit_error",
-                "usage_limit_reached",
-                extra=extra or None,
-                headers=headers or None,
-            ) from e
+            raise _usage_limit_error(e, session_id) from e
         except Exception as e:
             logger.error(
                 "Failed to create Claude session", session_id=session_id, error=str(e)
@@ -440,6 +446,8 @@ async def create_chat_completion(request: ChatCompletionRequest, req: Request) -
     except HTTPException:
         # Re-raise HTTP exceptions
         raise
+    except ClaudeUsageLimitError as e:
+        raise _usage_limit_error(e, session_id) from e
     except Exception as e:
         logger.error(
             "Unexpected error in chat completion",
