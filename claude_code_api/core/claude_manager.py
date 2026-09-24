@@ -1,6 +1,7 @@
 """Claude Code process management."""
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -17,6 +18,8 @@ from .config import settings
 from .security import ensure_directory_within_base
 
 logger = structlog.get_logger()
+
+READER_DRAIN_SECONDS = 1.0
 
 
 class ClaudeProcess:
@@ -207,6 +210,15 @@ class ClaudeProcess:
         except Exception as e:
             logger.error("Error reading stderr", error=str(e))
 
+    async def _drain_readers(self) -> None:
+        """Let buffered stdout and stderr be consumed before reporting an error."""
+        for task in (self._output_task, self._error_task):
+            if task and not task.done():
+                with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                    await asyncio.wait_for(
+                        asyncio.shield(task), timeout=READER_DRAIN_SECONDS
+                    )
+
     async def _verify_startup(self) -> bool:
         """Detect early process failures so API can return actionable errors."""
         if not self.process:
@@ -218,10 +230,14 @@ class ClaudeProcess:
         while loop.time() < deadline:
             return_code = self.process.returncode
             if return_code is None:
+                if self._result_error:
+                    break
                 await asyncio.sleep(0.05)
                 continue
 
-            if return_code == 0:
+            await self._drain_readers()
+
+            if return_code == 0 and not self._result_error:
                 return True
 
             error_text = self._compose_process_error(return_code)
@@ -231,6 +247,15 @@ class ClaudeProcess:
                 session_id=self.session_id,
                 return_code=return_code,
                 error=error_text,
+            )
+            return False
+
+        if self._result_error:
+            self.last_error = self._result_error
+            logger.error(
+                "Claude reported a terminal error",
+                session_id=self.session_id,
+                error=self._result_error,
             )
             return False
 

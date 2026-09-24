@@ -1,5 +1,6 @@
 """Tests for Claude subscription usage limit detection."""
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -132,3 +133,37 @@ async def test_usage_limit_on_stdout_skips_model_fallback(monkeypatch, tmp_path)
         )
 
     assert len(attempts) == 1
+
+
+class _ExitedProcess:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+
+@pytest.mark.asyncio
+async def test_startup_fails_when_result_reports_error_with_zero_exit(tmp_path):
+    process = cm.ClaudeProcess(session_id="sess", project_path=str(tmp_path))
+    process.process = _ExitedProcess(0)
+    process._record_output_error(
+        {"type": "result", "is_error": True, "result": "Usage limit reached"}
+    )
+
+    assert await process._verify_startup() is False
+    assert "Usage limit reached" in process.last_error
+
+
+@pytest.mark.asyncio
+async def test_startup_drains_pending_output_before_composing_error(tmp_path):
+    process = cm.ClaudeProcess(session_id="sess", project_path=str(tmp_path))
+    process.process = _ExitedProcess(1)
+
+    async def late_reader():
+        await asyncio.sleep(0.2)
+        process._record_output_error(
+            {"type": "result", "is_error": True, "result": "Usage limit reached"}
+        )
+
+    process._output_task = asyncio.create_task(late_reader())
+
+    assert await process._verify_startup() is False
+    assert "Usage limit reached" in process.last_error
