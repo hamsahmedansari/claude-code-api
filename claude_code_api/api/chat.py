@@ -195,11 +195,18 @@ async def _resolve_session(
         session_id = request.session_id
         session_info = await session_manager.get_session(session_id)
         if not session_info:
-            raise _http_error(
-                status.HTTP_404_NOT_FOUND,
-                f"Session {session_id} not found",
-                "invalid_request_error",
-                "session_not_found",
+            # Idempotent: an unknown id is CREATED rather than rejected.
+            #
+            # A caller that owns its own conversation ids -- a chat bot keyed on
+            # an external thread id -- can then send the same session_id on
+            # every turn with no pre-create round trip, and keeps working after
+            # the gateway's database is reset. Callers that do not manage ids
+            # (they omit session_id) are unaffected.
+            await session_manager.create_session(
+                project_id=project_id,
+                model=claude_model,
+                system_prompt=system_prompt,
+                session_id=session_id,
             )
         return session_id
     return await session_manager.create_session(
