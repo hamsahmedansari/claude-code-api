@@ -19,6 +19,8 @@ from claude_code_api.core.claude_manager import (
 )
 from claude_code_api.core.session_manager import SessionManager
 from claude_code_api.models.claude import get_default_model, validate_claude_model
+from sqlalchemy.exc import IntegrityError
+
 from claude_code_api.models.openai import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -202,12 +204,25 @@ async def _resolve_session(
             # every turn with no pre-create round trip, and keeps working after
             # the gateway's database is reset. Callers that do not manage ids
             # (they omit session_id) are unaffected.
-            await session_manager.create_session(
-                project_id=project_id,
-                model=claude_model,
-                system_prompt=system_prompt,
-                session_id=session_id,
-            )
+            try:
+                await session_manager.create_session(
+                    project_id=project_id,
+                    model=claude_model,
+                    system_prompt=system_prompt,
+                    session_id=session_id,
+                )
+            except IntegrityError:
+                # The row exists even though get_session did not return it:
+                # that lookup filters on is_active, and a session left
+                # inactive by an earlier failed request still holds its
+                # primary key. Re-creating it is impossible and unnecessary
+                # -- the id is valid, which is all the caller needs.
+                #
+                # Found in production: every reply 500ed after a gateway
+                # restart, because the bot keys sessions on an external
+                # thread id and every thread it had ever answered already
+                # had a row.
+                pass
         return session_id
     return await session_manager.create_session(
         project_id=project_id, model=claude_model, system_prompt=system_prompt
